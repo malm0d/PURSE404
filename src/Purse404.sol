@@ -9,7 +9,9 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-contract PurseToken is Initializable, ERC20Upgradeable, ERC20BurnableUpgradeable, ERC20PausableUpgradeable, AccessControlUpgradeable, ERC20PermitUpgradeable, UUPSUpgradeable {
+import {Lite404Upgradeable} from "./Lite404Upgradeable.sol";
+
+contract PurseToken is Initializable, ERC20Upgradeable, ERC20BurnableUpgradeable, ERC20PausableUpgradeable, AccessControlUpgradeable, ERC20PermitUpgradeable, UUPSUpgradeable, Lite404Upgradeable {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
@@ -58,11 +60,20 @@ contract PurseToken is Initializable, ERC20Upgradeable, ERC20BurnableUpgradeable
     {}
 
     // The following functions are overrides required by Solidity.
-
     function _update(address from, address to, uint256 value)
         internal
         override(ERC20Upgradeable, ERC20PausableUpgradeable)
     {
         super._update(from, to, value);
+    }
+
+    function updateBaseValue(uint256 _value) external onlyRole(UPGRADER_ROLE) {
+        require(_value > 0, "PurseToken: base value must be greater than 0");
+        base = _value;
+        emit BaseValueUpdated(_value);
+    }
+
+    function approve(address spender, uint256 value) public override(ERC20Upgradeable, Lite404Upgradeable) returns (bool) {
+        return Lite404Upgradeable.approve(spender, value);
     }
 }
