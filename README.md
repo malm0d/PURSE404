@@ -1,3 +1,7 @@
+## Disclaimer
+
+This is a highly experimental build for a very specific use-case. Use at your own risk.
+
 ## Foundry
 
 **Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
