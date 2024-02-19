@@ -40,7 +40,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///@dev Token id prefix. This is the same as: 2 ** 255.
     ///Note Every token id will be represented as: ID_ENCODING_PREFIX + id
     ///     This allows for a simple way to differentiate between ERC20 and ERC721 tokens,
-    ///     and allows 2 ** 255 token ids to be minted.
+    ///     and allows 2 ** 255 - 1 token ids to be minted.
     uint256 public constant ID_ENCODING_PREFIX = 1 << 255;
 
     /*------------------------------------------------------------------------*/
@@ -216,6 +216,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         uint256 nftsToTransfer = _value / base;
 
         //Check if _from has enough NFTs to transfer
+        ???
 
         //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
         for (uint256 i = 0; i < nftsToTransfer;) {
@@ -406,6 +407,11 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         if (_mintedNFTSupply > _MAX_TOKEN_ID) {
             revert ERC721MintLimitReached();
         }
+
+        //Option to allow larger supply of NFT to mint
+        // if (_mintedNFTSupply == type(uint256).max) {
+        //     revert ERC721MintLimitReached();
+        // }
 
         uint256 mintableId =  ID_ENCODING_PREFIX + _mintedNFTSupply;
 
