@@ -14,30 +14,38 @@ import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/
 ///
 /// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! IMPORTANT !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 /// This contract was designed with a very specific utility in mind. It should be considered
-/// highly experimental and should not be used in production without thorough testing.
+/// HIGHLY experimental and should not be used in production without thorough testing.
 ///
 /// -------------------------------------USE AT OWN RISK-------------------------------------
 
 /// @custom:oz-upgrades-from PurseToken
 abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20Upgradeable {
-    /*------------------------------------------------------------*/
-    /*                           Events                           */
-    /*------------------------------------------------------------*/
+
+    /*------------------------------------------------------------------------*/
+    /*                                 Events                                 */
+    /*------------------------------------------------------------------------*/
+
     event ERC721Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
     event ERC721Approval(address indexed owner, address indexed spender, uint256 indexed id);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
     event BaseValueUpdated(uint256 newValue);
 
-    /*------------------------------------------------------------*/
-    /*                          Constants                         */
-    /*------------------------------------------------------------*/
+    /*------------------------------------------------------------------------*/
+    /*                                Constants                               */
+    /*------------------------------------------------------------------------*/
 
     ///@dev Current value is a placeholder, adjust accordingly
     uint256 internal constant _MAX_TOKEN_ID = 1_000_000;
 
-    /*------------------------------------------------------------*/
-    /*                           Storage                          */
-    /*------------------------------------------------------------*/    
+    ///@dev Token id prefix. This is the same as: 2 ** 255.
+    ///Note Every token id will be represented as: ID_ENCODING_PREFIX + id
+    ///     This allows for a simple way to differentiate between ERC20 and ERC721 tokens,
+    ///     and allows 2 ** 255 token ids to be minted.
+    uint256 public constant ID_ENCODING_PREFIX = 1 << 255;
+
+    /*------------------------------------------------------------------------*/
+    /*                                 Storage                                */
+    /*------------------------------------------------------------------------*/    
 
     ///@dev Current mint counter, which is also highest minted token id.
     //Also regarded as the total supply of minted NFTs
@@ -63,9 +71,9 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///     in the inheriting contract.
     uint256 public base;
 
-    /*------------------------------------------------------------*/
-    /*                        Custom Errors                       */
-    /*------------------------------------------------------------*/
+    /*------------------------------------------------------------------------*/
+    /*                              Custom Errors                             */
+    /*------------------------------------------------------------------------*/
 
     error TokenDoesNotExist();
     error AlreadyExists();
@@ -73,158 +81,269 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     error InvalidRecipient();
     error InvalidSender();
     error Unauthorized();
+    error ERC721MintLimitReached();
 
-    /*------------------------------------------------------------*/
-    /*                         Initializer                        */
-    /*------------------------------------------------------------*/
+    /*------------------------------------------------------------------------*/
+    /*                               Initializer                              */
+    /*------------------------------------------------------------------------*/
 
     function __Lite404Upgradeable_init() internal onlyInitializing {}
 
-    /*------------------------------------------------------------*/
-    /*                        404 Operations                      */
-    /*------------------------------------------------------------*/
+    /*------------------------------------------------------------------------*/
+    /*                           Public 404 Operations                        */
+    /*------------------------------------------------------------------------*/
 
     function tokenURI(uint256 id) public view virtual returns (string memory);
 
     ///@notice Function for 404 approvals.
-    ///@dev The function handles approving an ERC721 if `_value` is less than 
-    ///     or equal to `_mintedNFTSupply`. Else it handles like
-    ///     an ERC20 approval.
+    ///@dev The function handles approving an ERC721 if `_valueOrId` is a valid ERC721 token id. 
+    ///     Else it handles like an ERC20 approval. Overrides ERC20's `approve`.
     ///Note For ERC721 approvals `_spender` must be allowed to be 0x00 so that
-    ///     the approval can be revoked. Overrides ERC20's `approve`
-    function approve(address _spender, uint256 _value) public virtual override returns (bool) {
-        if (_value <= _mintedNFTSupply && _value > 0) {
+    ///     the approval can be revoked.
+    function approve(address _spender, uint256 _valueOrId) public virtual override returns (bool) {
+        if (_isValidTokenId(_valueOrId)) {
             //Handle like an ERC721 approval
-            address nftOwner = _getOwnerOf(_value);
+            address nftOwner = _getOwnerOf(_valueOrId);
             if (msg.sender != nftOwner && !isApprovedForAll[nftOwner][msg.sender]) {
                 revert Unauthorized();
             }
 
-            getApproved[_value] = _spender;
-            emit ERC721Approval(nftOwner, _spender, _value);
+            getApproved[_valueOrId] = _spender;
+            emit ERC721Approval(nftOwner, _spender, _valueOrId);
             return true;
         } else {
             //Handle like an ERC20 approval
-            return super.approve(_spender, _value);
+            return super.approve(_spender, _valueOrId);
         }
     }
 
-    ///@notice Function for 404 transferFrom
-    ///@dev The function handles transferring an ERC721 if `_amountOrId` is less than
-    ///     or equal to `_mintedNFTSupply`. Else it handles like an ERC20 transferFrom.
-    ///Note Overrides ERC20's `transferFrom`.
-    function transferFrom(
-        address _from,
-        address _to,
-        uint256 _value
-    ) public virtual override returns (bool) {
-        //see 404 transferFrom, account for isApprovedForAll
-    }
-
-    ///@notice Function for ERC20-like transfers
-    ///@dev The function handles transferring ERC20 tokens. Treats small amounts that
-    ///     are valid ERC721 ids as ERC20s.
-    ///Note Overrides ERC20's `transfer`.
+    ///@notice Function for ERC20 transfers, with 404 context.
+    ///@dev The function handles transferring ERC20 tokens. Treats large amounts that are valid
+    ///     ERC721 token ids as ERC20s. Overrides ERC20's `transfer`.
+    ///Note Direct NFT transfers should be handled with `transferFromERC721`.
     function transfer(address _to, uint256 _value) public virtual override returns (bool) {
         if (_to == address(0)) {
             revert InvalidRecipient();
         }
-        _update(msg.sender, _to, _value);
+        _transferERC20WithERC721(msg.sender, _to, _value);
         return true;
     }
 
-    ///@dev Override ERC20's `_update` to handle 404 transfers - transferring ERC20 with ERC721
-    ///Note Alters ERC20's: _mint, _burn, transfer, transferFrom functions
-    function _update(address _from, address _to, uint256 _value) internal virtual override {
-        //Cache balances at start
+    ///@notice Function for mixed transfers from an operator that may be different than `_from`.
+    ///@dev The function assumes that the transfer is for an ERC721 token id if `_valueOrId` is a valid id
+    ///     as per `_isValidTokenId`. If so, it handles the transfer like an ERC721 `transferFrom`.
+    ///     Else handles like an ERC20 `transferFrom`. Overrides ERC20's `transferFrom`.
+    function transferFrom(
+        address _from,
+        address _to,
+        uint256 _valueOrId
+    ) public virtual override returns (bool) {
+        if (_isValidTokenId(_valueOrId)) {
+            transferFromERC721(_from, _to, _valueOrId);
+        } else {
+            _spendAllowance(_from, msg.sender, _valueOrId);
+            _transferERC20WithERC721(_from, _to, _valueOrId);
+        }
+        return true;
+    }
+
+    ///@notice Function for ERC20 minting, with 404 context.
+    ///@dev Allows minting of ERC20s with 404 context. Cannot mint to zero address.
+    ///     Emits ERC20 `Transfer` and `ERC721Transfer` events.
+    function mint(address _to, uint256 _value) public virtual returns (bool) {
+        //Cache before-balances of recipient
+        uint256 balBefore = balanceOf(_to);
+
+        //Mint ERC20 tokens
+        super._mint(_to, _value);
+
+        //Determine number of NFTs to mint along with amount of ERC20 tokens
+        uint256 nftsToTransfer = _value / base;
+
+        //Handle whole token transfers: NFTs to mint solely by `_value` alone.
+        for (uint256 i = 0; i < nftsToTransfer;) {
+            _mintERC721(_to);
+            unchecked { i++; }
+        }
+
+        //Account for recipient's fractional changes.
+        _accountForRecipientFractionals(_to, balBefore, nftsToTransfer);
+        return true;
+    }
+
+    ///@notice Function for ERC20 burning, with 404 context.
+    ///@dev Allows burning of ERC20s with 404 context. Cannot burn from zero address.
+    ///     Emits ERC20 `Transfer` and `ERC721Transfer` events.
+    function burn(address _from, uint256 _value) public virtual returns (bool) {
+        //Cache before-balances of sender
+        uint256 balBefore = balanceOf(_from);
+
+        //Burn ERC20 tokens
+        super._burn(_from, _value);
+
+        //Determine number of NFTs to burn along with amount of ERC20 tokens
+        uint256 nftsToTransfer = _value / base;
+
+        //Handle whole token transfers: NFTs to burn solely by `_value` alone.
+        for (uint256 i = 0; i < nftsToTransfer;) {
+            _burnERC721(_from);
+            unchecked { i++; }
+        }
+
+        //Account for sender's fractional changes.
+        _accountForSenderFractionals(_from, balBefore, nftsToTransfer);
+        return true;
+    }
+
+    /*------------------------------------------------------------------------*/
+    /*                          Internal 404 Operations                       */
+    /*------------------------------------------------------------------------*/
+
+    ///@dev Internal function to handle ERC20 transfers with ERC721.
+    ///     Emits ERC20 `Transfer` and `ERC721Transfer` events.
+    ///Note We should not override ERC20's `_update` as it will affect all ERC20 operations.
+    ///     This must and can only be used together with ERC20's `transfer`, `transferFrom`.
+    ///     CANNOT be used with ERC20's `_mint` and `_burn` because `_transferERC20` does not allow
+    ///     minting tokens from zero address and burning tokens to zero address.
+    function _transferERC20WithERC721(address _from, address _to, uint256 _value) internal virtual {
+        //Cache before-balances of sender and recipient
         uint256 senderBalanceBefore = balanceOf(_from);
         uint256 recipientBalanceBefore = balanceOf(_to);
+
+        _transferERC20(_from, _to, _value);
 
         //Determine number of NFTs to transfer
         uint256 nftsToTransfer = _value / base;
 
-        if (_from == address(0)) {
-            //Handle ERC20 _mint case.
-            //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
-            for (uint256 i = 0; i < nftsToTransfer;) {
-                _mintERC721(_to);
-                unchecked { i++; }
-            }
-            //Since its a mint, only account for recipient's fractional changes
-            _accountForRecipientFractionals(_to, recipientBalanceBefore, _value);
+        //Check if _from has enough NFTs to transfer
 
-        } else if (_to == address(0)) {
-            //Handle ERC20 _burn case
-            //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
-            for (uint256 i = 0; i < nftsToTransfer;) {
-                _burnERC721(_from);
-                unchecked { i++; }
-            }
-            //Since its a burn, only account for sender's fractional changes
-            _accountForSenderFractionals(_from, senderBalanceBefore, _value);
-
-        } else {
-            //Handle ERC20 regular transfers
-            //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
-            for (uint256 i = 0; i < nftsToTransfer;) {
-                _transferERC721(_from, _to, _value);
-                unchecked { i++; }
-            }
-            //Account for sender's and recipient's fractional changes.
-            _accountForSenderFractionals(_from, senderBalanceBefore, _value);
-            _accountForRecipientFractionals(_to, recipientBalanceBefore, _value);
+        //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
+        for (uint256 i = 0; i < nftsToTransfer;) {
+            //Get sender's ERC721 and transfer them to recipient
+            uint256 senderLastTokenId = _owned[_from][_owned[_from].length - 1];
+            _transferERC721(_from, _to, senderLastTokenId);
+            unchecked { i++; }
         }
 
-        //call ERC20's `_update` to account for ERC20 transfers
-        super._update(_from, _to, _value);
+        //Account for sender's and recipient's fractional changes.
+        _accountForSenderFractionals(_from, senderBalanceBefore, nftsToTransfer);
+        _accountForRecipientFractionals(_to, recipientBalanceBefore, nftsToTransfer);
     }
 
     ///@dev Accounts for sender's fractional changes.
-    ///    Checks if the transfer causes the sender to lose a whole token that was represented by
-    ///    an ERC721 due to a fractional amount being sent.
-    function _accountForSenderFractionals(address _sender, uint256 _balSenderBefore, uint256 _value) internal virtual {
-        uint256 fractionalAmount = _value % base;
-        if(((_balSenderBefore - fractionalAmount) / base) < (_balSenderBefore / base)) {
+    ///     Checks if the transfer causes the sender to lose a whole token that was represented by
+    ///     an ERC721 due to a fractional amount being sent.
+    ///Note Accounts for self-send, no ERC721 burned in this case.
+    function _accountForSenderFractionals(address _sender, uint256 _balSenderBefore, uint256 _nftsToTransfer) internal virtual {
+        if(_balSenderBefore / base - balanceOf(_sender) / base > _nftsToTransfer) {
             _burnERC721(_sender);
         }
         return;
     }
 
     ///@dev Accounts for recipient's fractional changes.
-    ///    Checks if the transfer causes the recipient to earn a whole token that is represented by
-    ///    an ERC721 due to a fractional amount being received.
-    function _accountForRecipientFractionals(address _recipient, uint256 _balRecipientBefore, uint256 _value) internal virtual {
-        uint256 fractionalAmount = _value % base;
-        if(((_balRecipientBefore + fractionalAmount) / base) > (_balRecipientBefore / base)) {
+    ///     Checks if the transfer causes the recipient to earn a whole token that is represented by
+    ///     an ERC721 due to a fractional amount being received.
+    ///Note Accounts for self-receive, no ERC721 minted in this case.
+    function _accountForRecipientFractionals(address _recipient, uint256 _balRecipientBefore, uint256 _nftsToTransfer) internal virtual {
+        if(balanceOf(_recipient) / base - _balRecipientBefore / base > _nftsToTransfer) {
             _mintERC721(_recipient);
         }
         return;
     }
 
-    /*------------------------------------------------------------*/
-    /*                       ERC721 Operations                    */
-    /*------------------------------------------------------------*/
+    ///@notice Pure ERC20 transfer.
+    ///@dev Uses ERC20's `_transfer` to handle ERC20 transfers.
+    ///     Prevents minting tokens from zero address.
+    //      Prevents burning of tokens to zero address.
+    function _transferERC20(address _from, address _to, uint256 _value) internal {
+        super._transfer(_from, _to, _value);
+    }
 
-    ///@notice Function for ERC721 setApprovalForAll
+    /*------------------------------------------------------------------------*/
+    /*                           ERC721 View Operations                       */
+    /*------------------------------------------------------------------------*/
+
+    ///@dev Returns the owner of token `id`.
+    function ownerOf(uint256 id) public view virtual returns (address) {
+        address _owner = _getOwnerOf(id);
+        if (!_isValidTokenId(id)) {
+            revert InvalidId();
+        }
+        if (_owner == address(0)) {
+            revert TokenDoesNotExist();
+        }
+        return _owner;
+    }
+
+    ///@dev Returns all owned token ids of `owner`.
+    function owned(address _owner) public view virtual returns (uint256[] memory) {
+        return _owned[_owner];
+    }
+
+    ///@dev Returns the erc721 balance of `owner`.
+    function balanceOfERC721(address _owner) public view virtual returns (uint256) {
+        return _owned[_owner].length;
+    }
+
+    ///@dev Returns the total supply of minted NFTs.
+    function totalSupplyERC721() public view virtual returns (uint256) {
+        return _mintedNFTSupply;
+    }
+
+    /*------------------------------------------------------------------------*/
+    /*                          ERC721 Public Operations                      */
+    /*------------------------------------------------------------------------*/
+
+    ///@notice Function for ERC721 setApprovalForAll.
     function setApprovalForAll(address _operator, bool _approved) public virtual {
         require(_operator != address(0), "404: Invalid operator address");
         isApprovedForAll[msg.sender][_operator] = _approved;
         emit ApprovalForAll(msg.sender, _operator, _approved);
     }
 
-    ///@notice Function for ERC721 safeTransferFrom with contract support
+    ///@notice Function for ERC721 transfers from.
+    ///@dev Transfers only 1 * base amount of ERC20 tokens and 1 ERC721 token.
+    ///     Does not allow zero address for `_from` and `_to`.
+    ///     Emits ERC20 `Transfer` and `ERC721Transfer` events.
+    ///Note Recommended use for ERC721 related transfers. Does not include callback check.
+    function transferFromERC721(address _from, address _to, uint256 _id) public virtual {
+        //Check `_from` is the owner of `_id`
+        if  (_from != _getOwnerOf(_id)) {
+            revert Unauthorized();
+        }
+
+        //Check that the operator is either sender or approved for the transfer
+        //Reverts if the operator is not the sender, not approved for all, and not approved for the transfer
+        if (
+            msg.sender != _from
+            && !isApprovedForAll[_from][msg.sender]
+            && msg.sender != getApproved[_id]
+        ) {
+            revert Unauthorized();
+        }
+
+        _transferERC20(_from, _to, base);
+        _transferERC721(_from, _to, _id);
+    }
+
+    ///@notice Function for ERC721 safeTransferFrom with contract support.
+    ///        Only allows safeTransferFrom of valid ERC721 token ids. Cannot be used with ERC20.
+    ///Note Recommended for ERC721 transfers that require a safe callback check.
     function safeTransferFrom(address _from, address _to, uint256 _id) public virtual {
         safeTransferFrom(_from, _to, _id, "");
     }
 
-    ///@notice Function for ERC721 safeTransferFrom with contract support and callback data
+    ///@notice Function for ERC721 safeTransferFrom with contract support and callback data.
+    ///        Only allows safeTransferFrom of valid ERC721 token ids. Cannot be used with ERC20.
+    ///Note Recommended for ERC721 transfers that require a safe callback check.
     function safeTransferFrom(
         address _from,
         address _to,
         uint256 _id,
         bytes memory _data
     ) public virtual {
-        if (_id > _mintedNFTSupply || _id == 0) {
+        if (!_isValidTokenId(_id)) {
             revert InvalidId();
         }
 
@@ -235,7 +354,11 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         }
     }
 
-    ///@notice Function for ERC721 _checkOnERC721Received
+    /*------------------------------------------------------------------------*/
+    /*                         ERC721 Internal Operations                     */
+    /*------------------------------------------------------------------------*/
+
+    ///@notice Function for ERC721 _checkOnERC721Received.
     ///@dev Performs a call to {IERC721Receiver-onERC721Received} on `to`.
     ///     Reverts if the target is a contract and does not support the function correctly.
     ///
@@ -275,13 +398,16 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         }
     }
 
-    ///@notice Function for ERC721 mint
+    ///@notice Function for ERC721 mint.
     function _mintERC721(address _to) internal virtual returns (uint256) {
         require(_to != address(0), "404: Zero address");
 
-        unchecked { _mintedNFTSupply++; }
-        uint256 mintableId = _mintedNFTSupply;
-        require(mintableId <= _MAX_TOKEN_ID, "404: Max NFT supply reached");
+        ++_mintedNFTSupply;
+        if (_mintedNFTSupply > _MAX_TOKEN_ID) {
+            revert ERC721MintLimitReached();
+        }
+
+        uint256 mintableId =  ID_ENCODING_PREFIX + _mintedNFTSupply;
 
         if (_getOwnerOf(mintableId) != address(0)) {
             revert AlreadyExists();
@@ -291,16 +417,16 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         return mintableId;
     }
 
-    ///@notice Function for ERC721 Burn
-    ///@dev Burns the last token id in the owned array of `_owner`
-    ///     Burning is a transfer to the zero address
+    ///@notice Function for ERC721 Burn.
+    ///@dev Burns the last token id in the owned array of `_owner`.
+    ///     Burning is a transfer to the zero address.
     function _burnERC721(address _from) internal virtual {
         require(_from != address(0), "404: Zero address");
         uint256 _id = _owned[_from][_owned[_from].length - 1];
         _transferERC721(_from, address(0), _id);
     }
 
-    ///@notice Pure ERC721 transfer
+    ///@notice Pure ERC721 transfer.
     ///@dev Assign token to new owner, remove from old owner.
     ///Note Transfers to and from 0x00 are allowed.
     function _transferERC721(
@@ -347,40 +473,24 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         emit ERC721Transfer(_from, _to, _id);
     }
 
-    ///@dev Returns the owner of token `id`
-    function ownerOf(uint256 id) public view virtual returns (address) {
-        address _owner = _getOwnerOf(id);
-        if (id > _mintedNFTSupply || id == 0 || _owner == address(0)) {
-            revert TokenDoesNotExist();
-        }
-        return _owner;
-    }
+    /*------------------------------------------------------------------------*/
+    /*                                 Utility                                */
+    /*------------------------------------------------------------------------*/
 
-    ///@dev Returns all owned token ids of `owner`
-    function owned(address _owner) public view virtual returns (uint256[] memory) {
-        return _owned[_owner];
-    }
-
-    ///@dev Returns the erc721 balance of `owner`
-    function erc721BalanceOf(address _owner) public view virtual returns (uint256) {
-        return _owned[_owner].length;
-    }
-
-    ///@dev Returns the total supply of minted NFTs
-    function erc721TotalSupply() public view virtual returns (uint256) {
-        return _mintedNFTSupply;
-    }
-
-    /*------------------------------------------------------------*/
-    /*                           Utility                          */
-    /*------------------------------------------------------------*/
-
-    ///@dev Check if "addr" has bytecode or not
+    ///@dev Check if "addr" has bytecode or not.
     function _isContract(address addr) private view returns (bool res) {
         /// @solidity memory-safe-assembly
         assembly {
             res := extcodesize(addr)
         }
+    }
+
+    ///@dev For a given token id, it will be valid if it falls within the range of possible
+    ///     token ids. It does not necessarily have to be minted yet.
+    ///     A token id is valid if it is greater than `ID_ENCODING_PREFIX` and not equal to `type(uint256).max`.
+    ///Note Do not confuse this with `ownerOf` or `_getOwnerOf` which checks for the owner of a token id.
+    function _isValidTokenId(uint256 _id) internal pure returns (bool) {
+        return _id > ID_ENCODING_PREFIX && _id != type(uint256).max;
     }
 
     function _getOwnerOf(uint256 id) internal view virtual returns (address) {
