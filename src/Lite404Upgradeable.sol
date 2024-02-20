@@ -75,13 +75,14 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     /*                              Custom Errors                             */
     /*------------------------------------------------------------------------*/
 
-    error TokenDoesNotExist();
+    error NotFound();
     error AlreadyExists();
     error InvalidId();
     error InvalidRecipient();
     error InvalidSender();
     error Unauthorized();
     error ERC721MintLimitReached();
+    error ERC721InsufficientBalance();
 
     /*------------------------------------------------------------------------*/
     /*                               Initializer                              */
@@ -215,8 +216,10 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         //Determine number of NFTs to transfer
         uint256 nftsToTransfer = _value / base;
 
-        //Check if _from has enough NFTs to transfer
-        ???
+        //Check if `_from` has enough NFTs to transfer
+        if (balanceOfERC721(_from) < nftsToTransfer) {
+            revert ERC721InsufficientBalance();
+        }
 
         //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
         for (uint256 i = 0; i < nftsToTransfer;) {
@@ -272,7 +275,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
             revert InvalidId();
         }
         if (_owner == address(0)) {
-            revert TokenDoesNotExist();
+            revert NotFound();
         }
         return _owner;
     }
@@ -312,6 +315,14 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         //Check `_from` is the owner of `_id`
         if  (_from != _getOwnerOf(_id)) {
             revert Unauthorized();
+        }
+
+        if (_from == address(0)) {
+            revert InvalidSender();
+        }
+
+        if (_to == address(0)) {
+            revert InvalidRecipient();
         }
 
         //Check that the operator is either sender or approved for the transfer
