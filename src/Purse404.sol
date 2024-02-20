@@ -49,10 +49,6 @@ contract PurseToken is Initializable, ERC20Upgradeable, ERC20BurnableUpgradeable
         _unpause();
     }
 
-    function mint(address to, uint256 amount) public override(Lite404Upgradeable) onlyRole(MINTER_ROLE) {
-        super.mint(to, amount);
-    }
-
     function _authorizeUpgrade(address newImplementation)
         internal
         onlyRole(UPGRADER_ROLE)
@@ -67,13 +63,49 @@ contract PurseToken is Initializable, ERC20Upgradeable, ERC20BurnableUpgradeable
         super._update(from, to, value);
     }
 
+    /*------------------------------------------------------------------------*/
+    /*                      404 Authorized Only Functions                     */
+    /*------------------------------------------------------------------------*/
+
     function updateBaseValue(uint256 _value) external onlyRole(UPGRADER_ROLE) {
         require(_value > 0, "PurseToken: base value must be greater than 0");
         base = _value;
         emit BaseValueUpdated(_value);
     }
 
-    function approve(address spender, uint256 value) public override(ERC20Upgradeable, Lite404Upgradeable) returns (bool) {
+    function updateMaxTokenID(uint256 _maxTokenID) external onlyRole(UPGRADER_ROLE) {
+        require(_maxTokenID > 0, "PurseToken: max token ID must be greater than 0");
+        maxTokenID = _maxTokenID;
+        emit MaxTokenIdUpdated(_maxTokenID);
+    }
+
+    /*------------------------------------------------------------------------*/
+    /*                Overrides From ERC20 to 404 Implementation              */
+    /*------------------------------------------------------------------------*/
+
+    function approve(
+        address spender, 
+        uint256 value
+    ) public override(ERC20Upgradeable, Lite404Upgradeable) returns (bool) {
         return Lite404Upgradeable.approve(spender, value);
+    }
+
+    function mint(address to, uint256 amount) public override(Lite404Upgradeable) onlyRole(MINTER_ROLE) {
+        Lite404Upgradeable.mint(to, amount);
+    }
+
+    function transfer(
+        address to, 
+        uint256 value
+    ) public override(ERC20Upgradeable, Lite404Upgradeable) returns (bool) {
+        return Lite404Upgradeable.transfer(to, value);
+    }
+
+    function transferFrom(
+        address from, 
+        address to, 
+        uint256 value
+    ) public override(ERC20Upgradeable, Lite404Upgradeable) returns (bool) {
+        return Lite404Upgradeable.transferFrom(from, to, value);
     }
 }

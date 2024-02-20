@@ -9,8 +9,8 @@ import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/
 /// Note After upgrading with this contract, addresses need to be minted ERC721 tokens based on their 
 ///      existing ERC20 balances. An only owner/admin function in the inheriting contract must be 
 ///      implemented to handle this.
-///      An only owner/admin function to update the `base` value must also be implemented in the
-///      inheriting contract.
+///      An only owner/admin function to update the `_MAX_TOKEN_ID` & `base` value must also be implemented
+///      in the inheriting contract.
 ///
 /// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! IMPORTANT !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 /// This contract was designed with a very specific utility in mind. It should be considered
@@ -29,13 +29,11 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     event ERC721Approval(address indexed owner, address indexed spender, uint256 indexed id);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
     event BaseValueUpdated(uint256 newValue);
+    event MaxTokenIdUpdated(uint256 newValue);
 
     /*------------------------------------------------------------------------*/
     /*                                Constants                               */
     /*------------------------------------------------------------------------*/
-
-    ///@dev Current value is a placeholder, adjust accordingly
-    uint256 internal constant _MAX_TOKEN_ID = 1_000_000;
 
     ///@dev Token id prefix. This is the same as: 2 ** 255.
     ///Note Every token id will be represented as: ID_ENCODING_PREFIX + id
@@ -66,6 +64,10 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         uint96 ownedIndex;
     }
     mapping(uint256 => OwnedData) internal _ownedData;
+
+    ///@dev A function to allow only the owner/administrator to update this value is required
+    ///     in the inheriting contract.
+    uint256 internal _MAX_TOKEN_ID = 1_000_000;
 
     ///@dev A function to allow only the owner/administrator to update this value is required
     ///     in the inheriting contract.
