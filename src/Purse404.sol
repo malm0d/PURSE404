@@ -8,6 +8,7 @@ import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"
 import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 
 import {Lite404Upgradeable} from "./Lite404Upgradeable.sol";
 
@@ -73,15 +74,20 @@ contract PurseToken is Initializable, ERC20Upgradeable, ERC20BurnableUpgradeable
         emit BaseValueUpdated(_value);
     }
 
+    ///@dev The default is 10,000 token ids
     function updateMaxTokenID(uint256 _maxTokenID) external onlyRole(UPGRADER_ROLE) {
         require(_maxTokenID > 0, "PurseToken: max token ID must be greater than 0");
-        maxTokenID = _maxTokenID;
+        _MAX_TOKEN_ID = _maxTokenID;
         emit MaxTokenIdUpdated(_maxTokenID);
     }
 
     /*------------------------------------------------------------------------*/
     /*                Overrides From ERC20 to 404 Implementation              */
     /*------------------------------------------------------------------------*/
+
+    function tokenURI(uint256 id_) public pure override returns (string memory) {
+        return string.concat("https://example.com/token/", Strings.toString(id_));
+    }
 
     function approve(
         address spender, 

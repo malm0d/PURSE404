@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import {DoubleEndedQueue} from "./lib/DoubleEndedQueue.sol";
 
 /// @notice This contract adds 404 support to an already existing ERC20Upgradeable contract
 /// Note After upgrading with this contract, addresses need to be minted ERC721 tokens based on their 
@@ -20,6 +21,7 @@ import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/
 
 /// @custom:oz-upgrades-from PurseToken
 abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20Upgradeable {
+    using DoubleEndedQueue for DoubleEndedQueue.Uint256Deque;
 
     /*------------------------------------------------------------------------*/
     /*                                 Events                                 */
@@ -45,6 +47,9 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     /*                                 Storage                                */
     /*------------------------------------------------------------------------*/    
 
+    ///@dev The queue of ERC721 tokens stored in the contract.
+    DoubleEndedQueue.Uint256Deque internal _storedERC721Ids;
+
     ///@dev Current mint counter, which is also highest minted token id.
     //Also regarded as the total supply of minted NFTs
     uint256 internal _mintedNFTSupply;
@@ -65,9 +70,12 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     }
     mapping(uint256 => OwnedData) internal _ownedData;
 
+    /// @dev Addresses that are exempt from ERC-721 transfer, typically for gas savings (pairs, routers, etc)
+    mapping(address => bool) internal _erc721TransferExempt;
+
     ///@dev A function to allow only the owner/administrator to update this value is required
     ///     in the inheriting contract.
-    uint256 internal _MAX_TOKEN_ID = 1_000_000;
+    uint256 internal _MAX_TOKEN_ID = 10_000;
 
     ///@dev A function to allow only the owner/administrator to update this value is required
     ///     in the inheriting contract.
@@ -82,6 +90,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     error InvalidId();
     error InvalidRecipient();
     error InvalidSender();
+    error InvalidExemption();
     error Unauthorized();
     error ERC721MintLimitReached();
     error ERC721InsufficientBalance();
@@ -93,10 +102,30 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     function __Lite404Upgradeable_init() internal onlyInitializing {}
 
     /*------------------------------------------------------------------------*/
-    /*                           Public 404 Operations                        */
+    /*                            View 404 Operations                         */
     /*------------------------------------------------------------------------*/
 
+    function getERC721QueueLength() public view virtual returns (uint256) {
+        return _storedERC721Ids.length();
+    }
+
+    function getERC721TokensInQueue(
+        uint256 _start,
+        uint256 _count
+    ) public view virtual returns (uint256[] memory) {
+        uint256[] memory tokensInQueue = new uint256[](_count);
+        for (uint256 i = _start; i < _start + _count;) {
+            tokensInQueue[i - _start] = _storedERC721Ids.at(i);
+            unchecked { ++i; }
+        }
+        return tokensInQueue;
+    }
+
     function tokenURI(uint256 id) public view virtual returns (string memory);
+
+    /*------------------------------------------------------------------------*/
+    /*                           Public 404 Operations                        */
+    /*------------------------------------------------------------------------*/
 
     ///@notice Function for 404 approvals.
     ///@dev The function handles approving an ERC721 if `_valueOrId` is a valid ERC721 token id. 
@@ -166,7 +195,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         //Handle whole token transfers: NFTs to mint solely by `_value` alone.
         for (uint256 i = 0; i < nftsToTransfer;) {
             _mintERC721(_to);
-            unchecked { i++; }
+            unchecked { ++i; }
         }
 
         //Account for recipient's fractional changes.
@@ -189,7 +218,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         //Handle whole token transfers: NFTs to burn solely by `_value` alone.
         for (uint256 i = 0; i < nftsToTransfer;) {
             _burnERC721(_from);
-            unchecked { i++; }
+            unchecked { ++i; }
         }
 
         //Account for sender's fractional changes.
@@ -226,7 +255,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
             //Get sender's ERC721 and transfer them to recipient
             uint256 senderLastTokenId = _owned[_from][_owned[_from].length - 1];
             _transferERC721(_from, _to, senderLastTokenId);
-            unchecked { i++; }
+            unchecked { ++i; }
         }
 
         //Account for sender's and recipient's fractional changes.
@@ -240,7 +269,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///Note Accounts for self-send, no ERC721 burned in this case.
     function _accountForSenderFractionals(address _sender, uint256 _balSenderBefore, uint256 _nftsToTransfer) internal virtual {
         if(_balSenderBefore / base - balanceOf(_sender) / base > _nftsToTransfer) {
-            _burnERC721(_sender);
+            _withdrawAndStoreERC721(_sender);
         }
         return;
     }
@@ -251,7 +280,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///Note Accounts for self-receive, no ERC721 minted in this case.
     function _accountForRecipientFractionals(address _recipient, uint256 _balRecipientBefore, uint256 _nftsToTransfer) internal virtual {
         if(balanceOf(_recipient) / base - _balRecipientBefore / base > _nftsToTransfer) {
-            _mintERC721(_recipient);
+            _retrieveOrMintERC721(_recipient);
         }
         return;
     }
@@ -293,6 +322,11 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///@dev Returns the total supply of minted NFTs.
     function totalSupplyERC721() public view virtual returns (uint256) {
         return _mintedNFTSupply;
+    }
+
+    ///@dev Checks if an address is ERC721 transfer exempt.
+    function transferExemptERC721(address _address) public view virtual returns (bool) {
+        return _address == address(0) || _erc721TransferExempt[_address];
     }
 
     /*------------------------------------------------------------------------*/
@@ -366,6 +400,11 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         }
     }
 
+    /// @notice Function for self-exemption from ERC721 transfers.
+    function setSelfERC721TransferExempt(bool state_) public virtual {
+        _setERC721TransferExempt(msg.sender, state_);
+    }
+
     /*------------------------------------------------------------------------*/
     /*                         ERC721 Internal Operations                     */
     /*------------------------------------------------------------------------*/
@@ -410,6 +449,34 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         }
     }
 
+    /// @notice Internal function for ERC-721 minting and retrieval from the bank.
+    /// @dev This function will allow minting of new ERC-721s up to the total fractional supply. It will
+    ///      first try to pull from the bank, and if the bank is empty, it will mint a new token.
+    /// note Does not handle ERC-721 exemptions.
+    function _retrieveOrMintERC721(address _to) internal virtual {
+        if (_to == address(0)) {
+            revert InvalidRecipient();
+        }
+
+        uint256 tokenId;
+
+        if (!_storedERC721Ids.empty()) {
+            //Use tokens in the bank if not empty
+            tokenId = _storedERC721Ids.popBack();
+            address erc721Owner = _getOwnerOf(tokenId);
+            if (erc721Owner != address(0)) {
+                revert AlreadyExists();
+            }
+
+            //Does not handle ERC-721 exemptions.
+            _transferERC721(erc721Owner, _to, tokenId);
+
+        } else {
+            //Else mint a new token id
+            _mintERC721(_to);
+        }
+    }
+
     ///@notice Function for ERC721 mint.
     function _mintERC721(address _to) internal virtual returns (uint256) {
         require(_to != address(0), "404: Zero address");
@@ -434,6 +501,25 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         return mintableId;
     }
 
+    /// @notice Internal function for ERC-721 deposits to bank (this contract).
+    /// @dev This function will allow depositing of ERC-721s to the bank, which can be retrieved by future minters.
+    /// note Does not handle ERC-721 exemptions.
+    function _withdrawAndStoreERC721(address _from) internal virtual {
+        if (_from == address(0)) {
+            revert InvalidSender();
+        }
+
+        //Get the latest token added to the owner's a (LIFO)
+        uint256 tokenId = _owned[_from][_owned[_from].length - 1];
+
+        //Transfer to 0x00 (burn)
+        //Does not handle ERC-721 exemptions
+        _transferERC721(_from, address(0), tokenId);
+
+        //Record the token id in the contract's bank queue
+        _storedERC721Ids.pushFront(tokenId);
+    }
+
     ///@notice Function for ERC721 Burn.
     ///@dev Burns the last token id in the owned array of `_owner`.
     ///     Burning is a transfer to the zero address.
@@ -446,6 +532,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///@notice Pure ERC721 transfer.
     ///@dev Assign token to new owner, remove from old owner.
     ///Note Transfers to and from 0x00 are allowed.
+    /// Does not handle ERC-721 exemptions.
     function _transferERC721(
         address _from,
         address _to,
@@ -488,6 +575,47 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
         }
 
         emit ERC721Transfer(_from, _to, _id);
+    }
+
+    ///@dev Set ERC721 transfer exempt address.
+    function _setERC721TransferExempt(address _addr, bool _state) internal virtual {
+        if (_addr == address(0)) {
+            revert InvalidExemption();
+        }
+
+        //Adjust the ERC721 balances of the target to respect exemption rules.
+        //Despite this logic, it is still recommended practice to exempt prior to the target
+        //having an active balance.
+        if (_state) {
+            _clearERC721Balance(_addr);
+        } else {
+            _reinstateERC721Balance(_addr);
+        }
+        _erc721TransferExempt[_addr] = _state;
+    }
+
+    ///@dev Function to reinstate balance on exemption removal
+    function _reinstateERC721Balance(address _addr) private {
+        uint256 expectedERC721Balance = balanceOf(_addr) / base;
+        uint256 actualERC721Balance = balanceOfERC721(_addr);
+
+        uint256 nftsOwed = expectedERC721Balance - actualERC721Balance;
+        for (uint256 i = 0; i < nftsOwed;) {
+            //Transfer NFTs owed to the target
+            _retrieveOrMintERC721(_addr);
+            unchecked { ++i; }
+        }
+    }
+
+    ///@dev Function to clear balance on exemption inclusion
+    function _clearERC721Balance(address _addr) private {
+        uint256 erc721Balance = balanceOfERC721(_addr);
+
+        for (uint256 i = 0; i < erc721Balance;) {
+            //Transfer NFTs out
+            _withdrawAndStoreERC721(_addr);
+            unchecked { ++i; }
+        }
     }
 
     /*------------------------------------------------------------------------*/
