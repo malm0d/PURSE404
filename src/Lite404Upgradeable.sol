@@ -236,31 +236,65 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///     CANNOT be used with ERC20's `_mint` and `_burn` because `_transferERC20` does not allow
     ///     minting tokens from zero address and burning tokens to zero address.
     function _transferERC20WithERC721(address _from, address _to, uint256 _value) internal virtual {
-        //Cache before-balances of sender and recipient
+        //Cache ERC20 before-balances of sender and recipient
         uint256 senderBalanceBefore = balanceOf(_from);
         uint256 recipientBalanceBefore = balanceOf(_to);
 
         _transferERC20(_from, _to, _value);
 
-        //Determine number of NFTs to transfer
-        uint256 nftsToTransfer = _value / base;
+        //Cache exempt addresses for gas savings
+        bool isFromERC721TransferExempt = transferExemptERC721(_from);
+        bool isToERC721TransferExempt = transferExemptERC721(_to);
 
-        //Check if `_from` has enough NFTs to transfer
-        if (balanceOfERC721(_from) < nftsToTransfer) {
+        // Skip _withdrawAndStoreERC721 and/or _retrieveOrMintERC721 for ERC-721 transfer exempt addresses
+        // 1) to save gas
+        // 2) because ERC-721 transfer exempt addresses won't always have/need ERC-721s corresponding to their ERC20s.
+        if (isFromERC721TransferExempt && isToERC721TransferExempt) {
+            // Case 1) Both sender and recipient are ERC-721 transfer exempt. No ERC-721s need to be transferred.
+            //         No operations here
+        } else if (isFromERC721TransferExempt) {
+            // Case 2) Sender is ERC721 transfer exempt but the recipient is not.
+            //         Contract should not attempt to transfer ERC721s from the sender, but the recipient
+            //         should receive ERC721s from the bank/minted for any whole number increase in their balance.
+            //         Only cares about whole number increments.
+            uint256 nftsToRetrieveOrMint = (balanceOf(_to) / base) - (recipientBalanceBefore / base);
+            for (uint256 i = 0; i < nftsToRetrieveOrMint;) {
+                _retrieveOrMintERC721(_to);
+                unchecked { ++i; }
+            }
+        } else if (isToERC721TransferExempt) {
+            // Case 3) The sender is not ERC-721 transfer exempt, but the recipient is.
+            //         Contract should attempt to withdraw and store ERC-721s from the sender, but the recipient
+            //         should not receive ERC-721s from the bank/minted.
+            //         Only cares about whole number increments.
+            uint256 nftsToWithdrawAndStore = (senderBalanceBefore / base) - (balanceOf(_from) / base);
+            for (uint256 i = 0; i < nftsToWithdrawAndStore;) {
+                _withdrawAndStoreERC721(_from);
+                unchecked { ++i; }
+            }
+        } else {
+            // Case 4) Neither the sender nor the recipient are ERC-721 transfer exempt.
+
+            //Determine number of NFTs to transfer
+            uint256 nftsToTransfer = _value / base;
+
+            //Check if `_from` has enough NFTs to transfer
+            if (balanceOfERC721(_from) < nftsToTransfer) {
             revert ERC721InsufficientBalance();
-        }
+            }
 
-        //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
-        for (uint256 i = 0; i < nftsToTransfer;) {
+            //Handle whole token transfers: NFTs to transfer solely by `_value` alone.
+            for (uint256 i = 0; i < nftsToTransfer;) {
             //Get sender's ERC721 and transfer them to recipient
             uint256 senderLastTokenId = _owned[_from][_owned[_from].length - 1];
             _transferERC721(_from, _to, senderLastTokenId);
             unchecked { ++i; }
-        }
+            }
 
-        //Account for sender's and recipient's fractional changes.
-        _accountForSenderFractionals(_from, senderBalanceBefore, nftsToTransfer);
-        _accountForRecipientFractionals(_to, recipientBalanceBefore, nftsToTransfer);
+            //Account for sender's and recipient's fractional changes.
+            _accountForSenderFractionals(_from, senderBalanceBefore, nftsToTransfer);
+            _accountForRecipientFractionals(_to, recipientBalanceBefore, nftsToTransfer);
+        }
     }
 
     ///@dev Accounts for sender's fractional changes.
