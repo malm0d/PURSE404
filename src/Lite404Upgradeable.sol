@@ -151,7 +151,7 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
     ///@notice Function for ERC20 minting, with 404 context.
     ///@dev Allows minting of ERC20s with 404 context. Cannot mint to zero address.
     ///     Emits ERC20 `Transfer` and `ERC721Transfer` events.
-    function mint(address _to, uint256 _value) public virtual returns (bool) {
+    function mint(address _to, uint256 _value) public virtual {
         //Cache before-balances of recipient
         uint256 balBefore = balanceOf(_to);
 
@@ -169,13 +169,12 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
 
         //Account for recipient's fractional changes.
         _accountForRecipientFractionals(_to, balBefore, nftsToTransfer);
-        return true;
     }
 
     ///@notice Function for ERC20 burning, with 404 context.
     ///@dev Allows burning of ERC20s with 404 context. Cannot burn from zero address.
     ///     Emits ERC20 `Transfer` and `ERC721Transfer` events.
-    function burn(address _from, uint256 _value) public virtual returns (bool) {
+    function burn(address _from, uint256 _value) public virtual {
         //Cache before-balances of sender
         uint256 balBefore = balanceOf(_from);
 
@@ -193,7 +192,6 @@ abstract contract Lite404Upgradeable is Initializable, ContextUpgradeable, ERC20
 
         //Account for sender's fractional changes.
         _accountForSenderFractionals(_from, balBefore, nftsToTransfer);
-        return true;
     }
 
     /*------------------------------------------------------------------------*/

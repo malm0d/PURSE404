@@ -49,8 +49,8 @@ contract PurseToken is Initializable, ERC20Upgradeable, ERC20BurnableUpgradeable
         _unpause();
     }
 
-    function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
-        _mint(to, amount);
+    function mint(address to, uint256 amount) public override(Lite404Upgradeable) onlyRole(MINTER_ROLE) {
+        super.mint(to, amount);
     }
 
     function _authorizeUpgrade(address newImplementation)
