@@ -10,4 +10,7 @@ solc = "0.8.21"
 [fmt]
 multiline_func_header = "all"
 
+[fuzz]
+runs = 1000
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
