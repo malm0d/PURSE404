@@ -10,7 +10,7 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IERC20Errors} from "src/interfaces/IERC20Errors.sol";
 
 //Commands:
-// Clean and compile: forge clean && forge build
+// Clean and compile: forge clean && forge build (always run this whenever any code changes are made)
 // Run tests:         forge test --mc PurseTokenTest -vvvv --ffi
 // Gas report:        forge test --gas-report --ffi
 // ... --match-test testSomeSome (if you want to run for a specific test)
