@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {IERC721Receiver} from "@openzeppelin/contracts/interfaces/IERC721Receiver.sol";
 import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol";
 import {IPurseERC404} from "./interfaces/IPurseERC404.sol";
 import {DoubleEndedQueue} from "./lib/DoubleEndedQueue.sol";
@@ -14,43 +15,43 @@ import {PurseToken} from "./PurseToken.sol";
 abstract contract InheritERC404 is PurseToken, IPurseERC404 {
     using DoubleEndedQueue for DoubleEndedQueue.Uint256Deque;
 
-    /// @dev The queue of ERC-721 tokens stored in the contract.
+    // @dev The queue of ERC-721 tokens stored in the contract.
     DoubleEndedQueue.Uint256Deque private _storedERC721Ids;
 
-    /// @dev Units for ERC-721 representation
+    // @dev Units for ERC-721 representation
     uint256 public units;
 
-    /// @dev Current mint counter which also represents the highest
-    ///      minted id, monotonically increasing to ensure accurate ownership
+    // @dev Current mint counter which also represents the highest
+    //      minted id, monotonically increasing to ensure accurate ownership
     uint256 public minted;
 
-    /// @dev Initial chain id for EIP-2612 support
-    uint256 internal _INITIAL_CHAIN_ID;
-
-    /// @dev Initial domain separator for EIP-2612 support
-    bytes32 internal _INITIAL_DOMAIN_SEPARATOR;
-
-    /// @dev Approval in ERC-721 representaion
+    // @dev Approval in ERC-721 representaion
     mapping(uint256 => address) public getApproved;
 
-    /// @dev Approval for all in ERC-721 representation
+    // @dev Approval for all in ERC-721 representation
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
-    /// @dev Packed representation of ownerOf and owned indices
+    // @dev Packed representation of ownerOf and owned indices
     mapping(uint256 => OwnedData) internal _ownedData;
 
-    /// @dev Array of owned ids in ERC-721 representation
+    // @dev Array of owned ids in ERC-721 representation
     mapping(address => uint256[]) internal _owned;
 
-    /// @dev Constant for token id encoding
+    // @dev Constant for token id encoding
     uint256 public constant ID_ENCODING_PREFIX = 1 << 255;
 
-    /// @dev tokenURI for 721Metadata
+    // @dev tokenURI for 721Metadata
     string public baseTokenURI;
 
-    uint256 internal _MAX_TOKEN_ID;   // set constant for Max?
+    uint256 internal _MAX_TOKEN_ID;
 
-    /// @dev Packed representation of ownerOf and owned indices
+    // @dev Ether to cost to mint for 1 unit ERC-721
+    uint256 public mintingCost;
+
+    // @dev Address to keep minting cost for ERC-721
+    address public treasury;
+
+    // @dev Packed representation of ownerOf and owned indices
     struct OwnedData {
         address ownerOf;
         uint96 ownedIndex;
@@ -74,24 +75,25 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         emit ERC721Events.Approval(erc721Owner, spender_, id_);
     }
 
-    /// @dev Providing type(uint256).max for approval value results in an
-    ///      unlimited approval that is not deducted from on transfers.
+    /** 
+     * @dev Providing type(uint256).max for approval value results in an
+     *       unlimited approval that is not deducted from on transfers.
+     */
     function erc20Approve(
         address spender_,
         uint256 value_
     ) public virtual returns (bool) {
-        // Prevent granting 0x0 an ERC-20 allowance.
-        // if (spender_ == address(0)) {
-        //     revert InvalidSpender();
-        // }
 
+        // Check spender address == address(0) inside _approve().
         _approve(msg.sender, spender_, value_);
 
         return true;
     }
 
-    /// @notice Function for ERC-721 transfers from.
-    /// @dev This function is recommended for ERC721 transfers.
+    /** 
+     * @notice Function for ERC-721 transfers from.
+     *  @dev This function is recommended for ERC721 transfers.
+     */
     function erc721TransferFrom(
         address from_,
         address to_,
@@ -99,12 +101,12 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
     ) public virtual {
         // Prevent minting tokens from 0x0.
         if (from_ == address(0)) {
-            revert InvalidSender();
+            revert ERC721InvalidSender(address(0));
         }
 
         // Prevent burning tokens to 0x0.
         if (to_ == address(0)) {
-            revert InvalidRecipient();
+            revert ERC721InvalidReceiver(address(0));
         }
 
         if (from_ != _getOwnerOf(id_)) {
@@ -127,8 +129,10 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         emit ERC20Events.Transfer(from_, to_, units);
     }
 
-    /// @notice Function for ERC-20 transfers from.
-    /// @dev This function is recommended for ERC20 transfers
+    /**
+     * @notice Function for ERC-20 transfers from.
+     * @dev This function is recommended for ERC20 transfers
+     */
     function erc20TransferFrom(
         address from_,
         address to_,
@@ -136,12 +140,12 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
     ) public virtual returns (bool) {
         // Prevent minting tokens from 0x0.
         if (from_ == address(0)) {
-            revert InvalidSender();
+            revert ERC20InvalidSender(address(0));
         }
 
         // Prevent burning tokens to 0x0.
         if (to_ == address(0)) {
-            revert InvalidRecipient();
+            revert ERC20InvalidReceiver(address(0));
         }
 
         _spendAllowance(from_, msg.sender, value_);
@@ -151,29 +155,42 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         return _transferERC20(from_, to_, value_);
     }
 
-    /// @notice Function for mint 721
-    function mintERC721() public virtual {
+    /** 
+     * @notice Function to mint ERC-721, 
+     * @dev To be able to mint 1 unit of ERC-721, it will need 1,000,000 PURSE token inactive balance available in the address.
+     * It will cost Ether when mint ERC-721, exact cost to mint 1-ERC721, please refer to "mintingCost" in Wei
+     */
+    function mintERC721(uint256 mintUnit_) public virtual payable {
+        if(msg.value != mintingCost * mintUnit_) {
+            revert IncorrectEthValue();
+        }
+
         address to_ = _msgSender();
-        if(inactiveBalance(to_) < units) {
+
+        if(inactiveBalance(to_) < mintUnit_ * units) {
             revert InsufficientInactiveBalance();
         }
-        
-        ERC20Storage storage $ = _getERC20Storages();
-        uint256 tokenUserAbleToMint= (inactiveBalance(to_) / units);
+
         uint256 tokenAvailableToMint = _MAX_TOKEN_ID + getERC721QueueLength() - minted;
 
-        uint256 tokensToMint = 
-            (tokenUserAbleToMint > tokenAvailableToMint) ? 
-            tokenAvailableToMint : tokenUserAbleToMint;
-
-        //If no tokens to mint, then the limit is reached
-        if (tokensToMint == 0) {
+        if(mintUnit_ > tokenAvailableToMint) {
             revert MintLimitReached();
         }
+        
+        // Prevent sent Ether to 0x0
+        if (treasury == address(0)) {
+            revert ERC20InvalidReceiver(address(0));
+        }
+        
+        address recipient = payable(treasury);
+        (bool success, ) = recipient.call{value: msg.value}("");
+        require(success, "Failed to send Ether");
 
-        $._balances[to_] -= (tokensToMint * units);
+        // Update minter inactiveBalance/_balances.
+        ERC20Storage storage $ = _getERC20Storages();
+        $._balances[to_] -= (mintUnit_ * units);
 
-        for (uint256 i = 0; i < tokensToMint;) {
+        for (uint256 i = 0; i < mintUnit_;) {
             _retrieveOrMintERC721(to_);
             unchecked {
                 ++i;
@@ -184,11 +201,13 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
     /************************************
     /******** ERC-20 functions **********
     *************************************/
-    /// @notice Function for token approvals
-    /// @dev This function assumes the operator is attempting to approve
-    ///      an ERC-721 if valueOrId_ is a possibly valid ERC-721 token id.
-    ///      Unlike setApprovalForAll, spender_ must be allowed to be 0x0 so
-    ///      that approval can be revoked.
+    /**
+     * @notice Function for token approvals
+     * @dev This function assumes the operator is attempting to approve
+     *       an ERC-721 if valueOrId_ is a possibly valid ERC-721 token id.
+     *       Unlike setApprovalForAll, spender_ must be allowed to be 0x0 so
+     *       that approval can be revoked.
+     */
     function approve(
         address spender_,
         uint256 valueOrId_
@@ -202,9 +221,11 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         return true;
     }
 
-    /// @notice Function for mixed transfers from an operator that may be different than 'from'.
-    /// @dev This function assumes the operator is attempting to transfer an ERC-721
-    ///      if valueOrId is a possible valid token id.
+    /** 
+     *  @notice Function for mixed transfers from an operator that may be different than 'from'.
+     *  @dev This function assumes the operator is attempting to transfer an ERC-721
+     *       if valueOrId is a possible valid token id.
+     */
     function transferFrom(
         address from_,
         address to_,
@@ -220,14 +241,16 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         return true;
     }
 
-    /// @notice Function for ERC-20 transfers.
-    /// @dev This function assumes the operator is attempting to transfer as ERC-20
-    ///      given this function is only supported on the ERC-20 interface.
-    ///      Treats even large amounts that are valid ERC-721 ids as ERC-20s.
+    /**
+     *  @notice Function for ERC-20 transfers.
+     *  @dev This function assumes the operator is attempting to transfer as ERC-20
+     *       given this function is only supported on the ERC-20 interface.
+     *       Treats even large amounts that are valid ERC-721 ids as ERC-20s.
+     */
     function transfer(address to_, uint256 value_) public virtual override returns (bool) {
-        // Prevent burning tokens to 0x0.
+        // Prevent sent tokens to 0x0.
         if (to_ == address(0)) {
-            revert InvalidRecipient();
+            revert ERC20InvalidReceiver(address(0));
         }
 
         // Transferring ERC-20s directly requires the _transfer function.
@@ -260,87 +283,36 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         _transferERC20(account, address(0), value_);
     }
 
-    /// @notice Function for EIP-2612 permits
+    /**
+     * @dev Sets `value` as the allowance of `spender` over ``owner``'s tokens,
+     * given ``owner``'s signed approval.
+     * 
+     * See {IERC20Permit}
+     */
     function permit(
-        address owner_,
-        address spender_,
-        uint256 value_,
-        uint256 deadline_,
-        uint8 v_,
-        bytes32 r_,
-        bytes32 s_
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
     ) public override {
-        if (deadline_ < block.timestamp) {
-                revert PermitDeadlineExpired();
-            }
-
         // permit cannot be used for ERC-721 token approvals, so ensure
         // the value does not fall within the valid range of ERC-721 token ids.
-        if (_isValidTokenId(value_)) {
+        if (_isValidTokenId(value)) {
             revert InvalidApproval();
         }
 
-        if (spender_ == address(0)) {
-            revert InvalidSpender();
-        }
-
-        unchecked {
-            address recoveredAddress = ecrecover(
-                keccak256(
-                    abi.encodePacked(
-                        "\x19\x01",
-                        DOMAIN_SEPARATOR(),
-                        keccak256(
-                            abi.encode(
-                                keccak256(
-                                    "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"
-                                ),
-                                owner_,
-                                spender_,
-                                value_,
-                                _useNonce(owner_),
-                                deadline_
-                            )
-                        )
-                    )
-                ),
-                v_,
-                r_,
-                s_
-            );
-
-            if (recoveredAddress == address(0) || recoveredAddress != owner_) {
-                revert InvalidSigner();
-            }
-
-            _approve(recoveredAddress, spender_, value_);
-        }
-    }
-    
-    /// @notice Returns domain initial domain separator, or recomputes if chain id is not equal to initial chain id
-    function DOMAIN_SEPARATOR() public view override returns (bytes32) {
-        return
-        block.chainid == _INITIAL_CHAIN_ID
-            ? _INITIAL_DOMAIN_SEPARATOR
-            : _computeDomainSeparator();
-    }
-
-    /// @notice Double check later if this correct - CK
-    function supportsInterface(
-        bytes4 interfaceId
-    ) public view virtual override returns (bool) {
-        return
-            interfaceId == type(IPurseERC404).interfaceId ||
-            interfaceId == type(IERC721).interfaceId ||
-            interfaceId == type(IERC721Metadata).interfaceId ||
-            interfaceId == type(IERC165).interfaceId;
+        return super.permit(owner, spender, value, deadline, v, r, s);
     }
 
     /************************************
      ******** ERC-721 functions *********
      ************************************/
-
-    /// @notice Function for ERC-721 approvals
+    /**
+     *  @notice Function for ERC-721 approvals
+     */
     function setApprovalForAll(address operator_, bool approved_) public virtual {
         // Prevent approvals to 0x0.
         if (operator_ == address(0)) {
@@ -350,8 +322,10 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         emit ERC721Events.ApprovalForAll(msg.sender, operator_, approved_);
     }
 
-    /// @notice Function for ERC-721 transfers with contract support.
-    /// This function only supports moving valid ERC-721 ids, as it does not exist on the ERC-20 spec and will revert otherwise.
+    /**
+     *  @notice Function for ERC-721 transfers with contract support.
+     *  This function only supports moving valid ERC-721 ids, as it does not exist on the ERC-20 spec and will revert otherwise.
+     */
     function safeTransferFrom(
         address from_,
         address to_,
@@ -360,8 +334,10 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         safeTransferFrom(from_, to_, id_, "");
     }
 
-    /// @notice Function for ERC-721 transfers with contract support and callback data.
-    /// This function only supports moving valid ERC-721 ids, as it does not exist on the ERC-20 spec and will revert otherwise.
+    /**
+     *  @notice Function for ERC-721 transfers with contract support and callback data.
+     *  This function only supports moving valid ERC-721 ids, as it does not exist on the ERC-20 spec and will revert otherwise.
+     */
     function safeTransferFrom(
         address from_,
         address to_,
@@ -376,13 +352,27 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         _checkOnERC721Received(from_, to_, id_, data_);
     }
 
+    /**
+     *  @notice Double check later if this correct - CK
+     */
+    function supportsInterface(
+        bytes4 interfaceId
+    ) public view virtual override returns (bool) {
+        return
+            interfaceId == type(IPurseERC404).interfaceId ||
+            interfaceId == type(IERC721).interfaceId ||
+            interfaceId == type(IERC721Metadata).interfaceId ||
+            interfaceId == type(IERC165).interfaceId;
+    }
+
     /************************************
      ******** Internal functions ********
      ************************************/
-
-    /// @notice This is the lowest level ERC-20 transfer function, which
-    ///         should be used for both normal ERC-20 transfers as well as minting.
-    /// Note that this function allows transfers to and from 0x0.
+    /**
+     *  @notice This is the lowest level ERC-20 transfer function, which
+     *          should be used for both normal ERC-20 transfers as well as minting.
+     *  Note that this function allows transfers to and from 0x0.
+     */
     function _transferERC20(
         address from_,
         address to_,
@@ -392,8 +382,13 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         // the sender, and we should increase the total supply.
         if (from_ == address(0)) {
             _mint(to_, value_);
+        } else if (balanceOf(from_) < value_) {
+            //Revert if user's token balances are less than `value_`
+            revert ERC20InsufficientBalance(from_, balanceOf(from_), value_);
         } else {
-            if (inactiveBalance(from_) < value_ && erc721BalanceOf(from_) > 0) {
+            if (inactiveBalance(from_) < value_) {
+                //If user has ERC721 tokens, calculate how many ERC721s to withdraw and store,
+                //else go straight to `_burn` or `_transfer`
                 ERC20Storage storage $ = _getERC20Storages();
                 uint256 diffInValue = value_ - inactiveBalance(from_);
                 uint256 tokensToWithdrawAndStore = diffInValue / units + (diffInValue % units == 0 ? 0 : 1);
@@ -417,14 +412,15 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
                 _transfer(from_, to_, value_);
             }
         }
-
         return true;
     }
 
-    /// @notice Consolidated record keeping function for transferring ERC-721s.
-    /// @dev Assign the token to the new owner, and remove from the old owner.
-    /// Note that this function allows transfers to and from 0x0.
-    /// Does not handle ERC-721 exemptions.
+    /**
+     *  @notice Consolidated record keeping function for transferring ERC-721s.
+     *  @dev Assign the token to the new owner, and remove from the old owner.
+     *  Note that this function allows transfers to and from 0x0.
+     *  Does not handle ERC-721 exemptions.
+     */
     function _transferERC721WithERC20(
         address from_,
         address to_,
@@ -462,18 +458,20 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
             delete _ownedData[id_];
         }
 
-        //emit ERC721Events.Transfer(from_, to_, id_);
+        emit ERC721Events.Transfer(from_, to_, id_);
     }
 
-    /// @notice Internal function for ERC20 minting
-    /// @dev This function will allow minting of new ERC20s.
-    ///      If mintCorrespondingERC721s_ is true, and the recipient is not ERC-721 exempt, it will
-    ///      also mint the corresponding ERC721s.
-    /// Handles ERC-721 exemptions.
+    /**
+     *  @notice Internal function for ERC20 minting
+     *  @dev This function will allow minting of new ERC20s.
+     *       If mintCorrespondingERC721s_ is true, and the recipient is not ERC-721 exempt, it will
+     *       also mint the corresponding ERC721s.
+     *  Handles ERC-721 exemptions.
+     */
     function _mintERC20(address to_, uint256 value_) internal virtual {
-        /// You cannot mint to the zero address (you can't mint and immediately burn in the same transfer).
+        // You cannot mint to the zero address (you can't mint and immediately burn in the same transfer).
         if (to_ == address(0)) {
-            revert InvalidRecipient();
+            revert ERC20InvalidReceiver(address(0));
         }
 
         if (totalSupply() + value_ > ID_ENCODING_PREFIX) {
@@ -483,13 +481,15 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         _transferERC20(address(0), to_, value_);
     }
 
-    /// @notice Internal function for ERC-721 minting and retrieval from the bank.
-    /// @dev This function will allow minting of new ERC-721s up to the total fractional supply. It will
-    ///      first try to pull from the bank, and if the bank is empty, it will mint a new token.
-    /// Does not handle ERC-721 exemptions.
+    /**
+     *  @notice Internal function for ERC-721 minting and retrieval from the bank.
+     *  @dev This function will allow minting of new ERC-721s up to the total fractional supply. It will
+     *       first try to pull from the bank, and if the bank is empty, it will mint a new token.
+     *  Does not handle ERC-721 exemptions.
+     */
     function _retrieveOrMintERC721(address to_) internal virtual {
         if (to_ == address(0)) {
-            revert InvalidRecipient();
+            revert ERC721InvalidReceiver(address(0));
         }
 
         uint256 id;
@@ -523,12 +523,14 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         _transferERC721WithERC20(erc721Owner, to_, id);
     }
 
-    /// @notice Internal function for ERC-721 deposits to bank (this contract).
-    /// @dev This function will allow depositing of ERC-721s to the bank, which can be retrieved by future minters.
-    // Does not handle ERC-721 exemptions.
+    /**
+     *  @notice Internal function for ERC-721 deposits to bank (this contract).
+     *  @dev This function will allow depositing of ERC-721s to the bank, which can be retrieved by future minters.
+     *  Does not handle ERC-721 exemptions.
+     */
     function _withdrawAndStoreERC721(address from_) internal virtual {
         if (from_ == address(0)) {
-            revert InvalidSender();
+            revert ERC721InvalidSender(address(0));
         }
 
         // Retrieve the latest token added to the owner's stack (LIFO).
@@ -561,7 +563,7 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
                 if (reason.length == 0) {
                     revert ERC721InvalidReceiver(to);
                 } else {
-                    /// @solidity memory-safe-assembly
+                    // @solidity memory-safe-assembly
                     assembly {
                         revert(add(32, reason), mload(reason))
                     }
@@ -576,25 +578,11 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
         }
     }
 
-    /// @notice Internal function to compute domain separator for EIP-2612 permits
-    function _computeDomainSeparator() internal view virtual returns (bytes32) {
-        return
-        keccak256(
-            abi.encode(
-            keccak256(
-                "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-            ),
-            keccak256(bytes(name())),
-            keccak256("1"),
-            block.chainid,
-            address(this)
-            )
-        );
-    }
-
-    /// @notice For a token token id to be considered valid, it just needs
-    ///         to fall within the range of possible token ids, it does not
-    ///         necessarily have to be minted yet.
+    /**
+     * @notice For a token token id to be considered valid, it just needs
+     *          to fall within the range of possible token ids, it does not
+     *          necessarily have to be minted yet.
+     */ 
     function _isValidTokenId(uint256 id_) internal view returns (bool) {
         return id_ > ID_ENCODING_PREFIX && id_ <= ID_ENCODING_PREFIX + _MAX_TOKEN_ID;
     }
@@ -638,27 +626,36 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
     /************************************
      ******** Public View functions *****
      ************************************/
-
-    /// @dev See {IERC20-balanceOf}.
+    /**  
+     * @dev See {IERC20-balanceOf}.
+     */
     function balanceOf(address account) public view override returns (uint256) {
         return inactiveBalance(account) + activeBalance(account);
     }
 
-    /// @notice tokenURI must be implemented by child contract
+    /**  
+     * @notice tokenURI must be implemented by child contract
+     */ 
     function tokenURI(uint256 id_) public view virtual returns (string memory);
 
-    /// @dev Nonconverted-721 ERC20 balance.
+    /**  
+     * @dev Nonconverted-721 ERC20 balance.
+     */
     function inactiveBalance(address account) public view virtual returns (uint256) {
         ERC20Storage storage $ = _getERC20Storages();
         return $._balances[account];
     }
 
-    /// @dev converted-721 ERC20 balance.
+    /**  
+     * @dev converted-721 ERC20 balance.
+     */
     function activeBalance(address account) public view virtual returns (uint256) {
         return erc721BalanceOf(account) * units;
     }
 
-    /// @notice Function to find owner of a given ERC-721 token
+    /**  
+     * @notice Function to find owner of a given ERC-721 token
+     */
     function ownerOf(
         uint256 id_
     ) public view virtual returns (address erc721Owner) {
@@ -717,11 +714,8 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
     /************************************
      ******** Admin functions ***********
      ************************************/
-
     function init404(uint256 unit404Decimals) external onlyRole(DEFAULT_ADMIN_ROLE) {
         units = 10 ** unit404Decimals;
-        _INITIAL_CHAIN_ID = block.chainid;
-        _INITIAL_DOMAIN_SEPARATOR = _computeDomainSeparator();
     }
 
     function setMaxTokenId(uint256 _cap) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -731,5 +725,39 @@ abstract contract InheritERC404 is PurseToken, IPurseERC404 {
 
     function setBaseURI(string memory baseURI) public onlyRole(DEFAULT_ADMIN_ROLE) {
         baseTokenURI = baseURI;
+    }
+
+    function setMint721Cost(uint256 _mintingCost) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        mintingCost = _mintingCost;
+    }
+
+    function setTreasuryAddress(address _treasury) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        treasury = _treasury;
+    }
+
+    function recoverToken(
+        address token,
+        address _recipient,
+        uint256 amount
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        // Prevent sent tokens to 0x0.
+        if (_recipient == address(0)) {
+            revert ERC20InvalidReceiver(address(0));
+        }
+        IERC20(token).transfer(_recipient, amount);
+    }
+
+    function recoverEth(
+        uint256 safeAmount,
+        address _recipient
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        // Prevent sent tokens to 0x0.
+        if (_recipient == address(0)) {
+            revert ERC20InvalidReceiver(address(0));
+        }
+
+        address recipient = payable(_recipient);
+        (bool success, ) = recipient.call{value: safeAmount}("");
+        require(success, "Failed to send Ether");
     }
 }

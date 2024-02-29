@@ -8,19 +8,16 @@ interface IPurseERC404 {
   error NotFound();
   error InvalidTokenId();
   error AlreadyExists();
-  error InvalidRecipient();
-  error InvalidSender();
-  error InvalidSpender();
   error InvalidOperator();
   error Unauthorized();
   error InsufficientAllowance();
-  error PermitDeadlineExpired();
-  error InvalidSigner();
   error InvalidApproval();
-  error OwnedIndexOverflow();
   error MintLimitReached();
   error InsufficientInactiveBalance();
+  error ERC721InvalidSender(address);
   error ERC721InvalidReceiver(address);
+  error IncorrectEthValue();
+  error FailToSendEther();
 
   // function name() external view returns (string memory);
   // function symbol() external view returns (string memory);
